@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>3. Output</h3>
+
+<div class="row">
+  <div class="col-md-7">
+    <form method="post" class="mb-3">
+      <button name="action" value="audit" class="btn btn-primary">Run full audit &rarr; CSV</button>
+    </form>
+  </div>
+  <div class="col-md-5">
+    <form method="post" class="input-group mb-3">
+      <input name="employee" class="form-control" placeholder="Employee ID e.g. 100579">
+      <button name="action" value="query" class="btn btn-outline-secondary">Look up one</button>
+    </form>
+  </div>
+</div>
+
+{% if single %}
+<div class="card mb-4">
+  <div class="card-header">
+    Employee <strong>{{ single.employee_id }}</strong> — {{ single.name }}
+    &nbsp; <span class="badge bg-primary">{{ single.hit_count }} md5 hits</span>
+  </div>
+  <ul class="list-group list-group-flush">
+    {% for md5, fields in single.hits.items() %}
+      <li class="list-group-item">
+        <code class="md5">{{ md5 }}</code>
+        <span class="text-muted">[{{ fields|join(', ') }}]</span>
+      </li>
+    {% else %}
+      <li class="list-group-item text-muted">No files hit.</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<hr>
+<h5>Generated files</h5>
+<ul>
+  {% for f in files %}
+    <li><a href="{{ url_for('download', filename=f) }}">{{ f }}</a></li>
+  {% else %}
+    <li class="text-muted">No output files yet — run an audit.</li>
+  {% endfor %}
+</ul>
+
+{% if state.last_results %}
+<h5 class="mt-4">Summary ({{ state.last_results|length }} employees)</h5>
+<div class="table-responsive">
+  <table class="table table-sm table-striped table-bordered">
+    <thead><tr><th>Employee ID</th><th>Worker</th><th>MD5 hit count</th><th>MD5s</th></tr></thead>
+    <tbody>
+      {% for r in state.last_results %}
+        <tr>
+          <td>{{ r.employee_id }}</td>
+          <td>{{ r.name }}</td>
+          <td>{{ r.hit_count }}</td>
+          <td><small>{{ r.md5s|join('; ') }}</small></td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<hr>
+<h5>Job log</h5>
+<div id="log" class="log-box">No job running.</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function poll() {
+  try {
+    const r = await fetch('/job/status');
+    const d = await r.json();
+    const box = document.getElementById('log');
+    box.textContent = d.log.length ? d.log.join('\n') : ('Status: ' + d.status);
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {}
+}
+setInterval(poll, 1500); poll();
+</script>
+{% endblock %}

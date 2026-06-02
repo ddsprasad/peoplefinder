@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>2. Master data &amp; fields of interest</h3>
+
+<form method="post" class="row g-2 align-items-end mb-3">
+  <div class="col-md-7">
+    <label class="form-label">Master sheet path (.xlsx)</label>
+    <input name="master_path" class="form-control" value="{{ state.master_path }}">
+  </div>
+  <div class="col-md-3">
+    <label class="form-label">Sheet</label>
+    {% if sheets %}
+      <select name="sheet" class="form-select">
+        {% for s in sheets %}
+          <option value="{{ s }}" {% if s==state.sheet %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    {% else %}
+      <input name="sheet" class="form-control" value="{{ state.sheet }}">
+    {% endif %}
+  </div>
+  <div class="col-md-2">
+    <button class="btn btn-primary w-100">Load / Browse</button>
+  </div>
+</form>
+
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+
+{% if columns %}
+<form method="post">
+  <input type="hidden" name="master_path" value="{{ state.master_path }}">
+  <input type="hidden" name="sheet" value="{{ state.sheet }}">
+
+  <div class="row mb-3">
+    <div class="col-md-6">
+      <label class="form-label">Employee ID column</label>
+      <select name="id_col" class="form-select">
+        {% for c in columns %}<option {% if c==state.id_col %}selected{% endif %}>{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Worker / name column</label>
+      <select name="name_col" class="form-select">
+        {% for c in columns %}<option {% if c==state.name_col %}selected{% endif %}>{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-md-6">
+      <h6>Anchor fields <small class="text-muted">(a match here = a hit)</small></h6>
+      {% for c in columns %}
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="anchor_cols" value="{{ c }}"
+               id="a_{{ loop.index }}" {% if c in state.anchor_cols %}checked{% endif %}>
+        <label class="form-check-label" for="a_{{ loop.index }}">{{ c }}</label>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="col-md-6">
+      <h6>Secondary fields <small class="text-muted">(extra evidence on a hit)</small></h6>
+      {% for c in columns %}
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="secondary_cols" value="{{ c }}"
+               id="s_{{ loop.index }}" {% if c in state.secondary_cols %}checked{% endif %}>
+        <label class="form-check-label" for="s_{{ loop.index }}">{{ c }}</label>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <button name="save_fields" value="1" class="btn btn-success mt-3">Save field selection</button>
+</form>
+
+<hr>
+<h6>Preview (first 15 rows)</h6>
+<div class="table-responsive">
+  <table class="table table-sm table-striped table-bordered">
+    <thead><tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for row in preview %}
+        <tr>{% for c in columns %}<td>{{ row[c] }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

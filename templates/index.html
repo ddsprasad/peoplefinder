@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>1. Build the search index</h3>
+<p class="text-muted">Edit the SQL that lists the data-lake files, then build the
+Azure AI Search index. <strong>Rebuild</strong> drops the existing index and
+re-wires it from scratch.</p>
+
+<form method="post">
+  <div class="mb-3">
+    <label class="form-label">SQL query <small class="text-muted">(must return md5, exportFileLocation)</small></label>
+    <textarea name="sql" class="form-control font-monospace" rows="9">{{ state.sql }}</textarea>
+  </div>
+  <button name="action" value="build" class="btn btn-primary">Build / Refresh index</button>
+  <button name="action" value="rebuild" class="btn btn-outline-danger"
+          onclick="return confirm('Drop the existing index and rebuild from scratch?');">
+    Rebuild (re-wire) index
+  </button>
+</form>
+
+<hr>
+<h5>Job log</h5>
+<div id="log" class="log-box">No job running.</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function poll() {
+  try {
+    const r = await fetch('/job/status');
+    const d = await r.json();
+    const box = document.getElementById('log');
+    box.textContent = d.log.length ? d.log.join('\n') : ('Status: ' + d.status);
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {}
+}
+setInterval(poll, 1500); poll();
+</script>
+{% endblock %}
