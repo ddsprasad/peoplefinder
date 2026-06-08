@@ -250,11 +250,30 @@ def build_field_query(value: str, mode: str = "exact", nick_lookup=None) -> str:
     return f'"{_escape_phrase(v)}"'
 
 
-def search_field(settings: Settings, value: str, mode: str = "exact",
+def build_multi_query(value: str, modes, nick_lookup=None) -> str:
+    """OR together the queries for one or more modes on the same field value.
+
+    `modes` may be a single mode string or a list of modes. Each sub-query is
+    parenthesized so the OR composes correctly. Returns None for empty input.
+    """
+    if isinstance(modes, str):
+        modes = [modes]
+    parts, seen = [], set()
+    for m in (modes or []):
+        q = build_field_query(value, m, nick_lookup)
+        if q and q not in seen:
+            seen.add(q)
+            parts.append(f"({q})")
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else " OR ".join(parts)
+
+
+def search_field(settings: Settings, value: str, modes="exact",
                  top: int = 1000, nick_lookup=None) -> Set[str]:
-    """Search content/file_name for one field value using the given mode;
-    return the set of matching md5s. Uses the Lucene (full) query parser."""
-    q = build_field_query(value, mode, nick_lookup)
+    """Search content/file_name for one field value using one or more modes
+    (OR'd); return the set of matching md5s. Uses the Lucene (full) parser."""
+    q = build_multi_query(value, modes, nick_lookup)
     if not q:
         return set()
     client = _search_client(settings)

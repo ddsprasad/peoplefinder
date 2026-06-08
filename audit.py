@@ -7,7 +7,7 @@ address matches are recorded as extra evidence on top of a confirmed hit.
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Set
 
 import pandas as pd
@@ -41,6 +41,8 @@ class EmployeeResult:
     name: str
     # md5 -> set of fields that matched in that file
     hits: Dict[str, Set[str]]
+    # column -> the value used for matching (only the strategy's fields)
+    field_values: Dict[str, str] = field(default_factory=dict)
 
     @property
     def hit_count(self) -> int:
@@ -183,26 +185,84 @@ def _slug(name: str) -> str:
 
 
 def write_strategy_outputs(settings: Settings, strategy_name: str,
-                           results: List[EmployeeResult]):
-    """Write a strategy's own summary + matrix CSVs; return their paths."""
+                           results: List[EmployeeResult], field_cols=None):
+    """Write a strategy's own summary + matrix CSVs and return their paths.
+
+    Columns are: 'Strategy' first, then only the fields the strategy matched on
+    (`field_cols`), then the md5 result columns -- no other data elements.
+    """
     os.makedirs(settings.output_dir, exist_ok=True)
     slug = _slug(strategy_name)
     summary_path = os.path.join(settings.output_dir, f"{slug}_summary.csv")
     matrix_path = os.path.join(settings.output_dir, f"{slug}_matrix.csv")
-    _write_result_csvs(results, summary_path, matrix_path)
+
+    # Preserve the strategy's field order; fall back to whatever results carry.
+    if field_cols is None:
+        field_cols = []
+        for r in results:
+            for c in r.field_values:
+                if c not in field_cols:
+                    field_cols.append(c)
+
+    def field_cells(r):
+        return {c: r.field_values.get(c, "") for c in field_cols}
+
+    # Summary: one row per employee (matching-field values + hit count + md5 list).
+    summary_cols = ["Strategy"] + field_cols + ["MD5 Hit Count", "MD5 List"]
+    summary_rows = [{
+        "Strategy": strategy_name,
+        **field_cells(r),
+        "MD5 Hit Count": r.hit_count,
+        "MD5 List": ";".join(sorted(r.hits.keys())),
+    } for r in results]
+    pd.DataFrame(summary_rows, columns=summary_cols) \
+        .to_csv(summary_path, index=False, encoding="utf-8-sig")
+
+    # Matrix: one row per (employee, md5) with the fields that matched.
+    matrix_cols = ["Strategy"] + field_cols + ["MD5", "Matched Fields"]
+    matrix_rows = []
+    for r in results:
+        for md5, fields in sorted(r.hits.items()):
+            matrix_rows.append({
+                "Strategy": strategy_name,
+                **field_cells(r),
+                "MD5": md5,
+                "Matched Fields": ";".join(sorted(fields)),
+            })
+    pd.DataFrame(matrix_rows, columns=matrix_cols) \
+        .to_csv(matrix_path, index=False, encoding="utf-8-sig")
+
+    total_hits = sum(r.hit_count for r in results)
+    log.info("Wrote %s (%d employees)", summary_path, len(results))
+    log.info("Wrote %s (%d employee/md5 rows)", matrix_path, total_hits)
     return summary_path, matrix_path
 
 
-def query_employee(settings, employee_id, master_path=None, sheet=None,
+def query_employee(settings, term, master_path=None, sheet=None,
                    id_col="Employee ID", name_col="Worker",
                    anchor_cols=None, secondary_cols=None) -> EmployeeResult:
-    """Live single-employee lookup against the index."""
+    """Live single-employee lookup by Employee ID *or* name (Worker).
+
+    Resolution order: exact Employee ID, then exact name (case-insensitive),
+    then a name 'contains' match. Uses the first matching row.
+    """
     anchor_cols = anchor_cols or list(ANCHOR_FIELDS.keys())
     secondary_cols = secondary_cols or list(SECONDARY_FIELDS.keys())
     df = load_master(settings, master_path, sheet)
-    match = df[df[id_col].astype(str).str.strip() == str(employee_id).strip()]
+    t = str(term).strip()
+
+    ids = df[id_col].astype(str).str.strip()
+    names = df[name_col].astype(str).str.strip()
+
+    match = df[ids == t]                                   # exact Employee ID
     if match.empty:
-        raise RuntimeError(f"Employee ID {employee_id} not found in master sheet.")
+        match = df[names.str.lower() == t.lower()]         # exact name
+    if match.empty:                                        # partial name
+        match = df[names.str.lower().str.contains(t.lower(), na=False, regex=False)]
+    if match.empty:
+        raise RuntimeError(
+            f"No employee found matching '{term}' "
+            f"(tried Employee ID and {name_col}).")
     return _audit_employee(settings, match.iloc[0], id_col, name_col,
                            anchor_cols, secondary_cols)
 
@@ -216,13 +276,18 @@ def _audit_employee_strategy(settings, row, id_col, name_col, fields):
     emp_id = _clean(row.get(id_col))
     name = _clean(row.get(name_col))
 
+    # Keep the value of each strategy field for the output (matching columns only).
+    field_values = {col: _clean(row.get(col)) for col in fields}
+
     # Search each populated field with its configured mode.
     field_md5s: Dict[str, Set[str]] = {}
     for col, cfg in fields.items():
-        term = _clean(row.get(col))
+        term = field_values.get(col)
         if term:
+            # `modes` is the new (list) form; fall back to legacy single `mode`.
+            modes = cfg.get("modes") or [cfg.get("mode", "exact")]
             field_md5s[col] = search_field(
-                settings, term, cfg.get("mode", "exact"), nick_lookup=NICKNAMES)
+                settings, term, modes, nick_lookup=NICKNAMES)
 
     mandatory = [c for c in field_md5s if fields[c].get("role", "mandatory") == "mandatory"]
     optional = [c for c in field_md5s if fields[c].get("role") == "optional"]
@@ -241,7 +306,8 @@ def _audit_employee_strategy(settings, row, id_col, name_col, fields):
     hits: Dict[str, Set[str]] = {}
     for md5 in qualifying:
         hits[md5] = {_col_to_field(c) for c, s in field_md5s.items() if md5 in s}
-    return EmployeeResult(employee_id=emp_id, name=name, hits=hits)
+    return EmployeeResult(employee_id=emp_id, name=name, hits=hits,
+                          field_values=field_values)
 
 
 def run_strategy(settings, strategy, master_path=None, sheet=None,
