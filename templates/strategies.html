@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block content %}
+<h3>3. Search strategies</h3>
+<p class="text-muted">A <strong>strategy</strong> is a named combination of fields.
+For each field pick <em>how</em> to search (the mode) and whether it is
+<strong>mandatory</strong> (must match — AND) or <strong>optional</strong> (extra
+evidence — OR). Each strategy you run writes its own pair of CSVs to the output
+folder.</p>
+
+{% if not columns %}
+<div class="alert alert-warning">
+  No master-sheet columns loaded. Go to <a href="/master">2. Master data</a>,
+  set the sheet path and click <em>Load / Browse</em> first — then come back here.
+</div>
+{% endif %}
+
+<!-- ===== Existing strategies ===== -->
+<h5>Defined strategies ({{ state.strategies|length }})</h5>
+{% if state.strategies %}
+<form method="post">
+  <table class="table table-sm table-bordered align-middle">
+    <thead>
+      <tr>
+        <th style="width:2.5rem;"></th>
+        <th>Name</th><th>Fields (mode · role)</th>
+        <th style="width:6rem;">Run</th><th style="width:5rem;"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in state.strategies %}
+      <tr>
+        <td><input class="form-check-input" type="checkbox" name="run_idx" value="{{ loop.index0 }}"></td>
+        <td><strong>{{ s.name }}</strong></td>
+        <td>
+          {% for col, cfg in s.fields.items() %}
+            <span class="badge {% if cfg.role=='mandatory' %}bg-primary{% else %}bg-secondary{% endif %} me-1 mb-1">
+              {{ col }} · {{ cfg.mode }} · {{ cfg.role }}
+            </span>
+          {% endfor %}
+        </td>
+        <td>
+          <button name="action" value="run_one:{{ loop.index0 }}"
+                  class="btn btn-sm btn-success" title="Run only this strategy">Run</button>
+        </td>
+        <td>
+          <button name="action" value="delete:{{ loop.index0 }}"
+                  class="btn btn-sm btn-outline-danger"
+                  onclick="return confirm('Delete strategy {{ s.name }}?');">Delete</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <button name="action" value="run_selected" class="btn btn-success">Run selected</button>
+  <button name="action" value="run_all" class="btn btn-primary">Run all</button>
+</form>
+{% else %}
+<p class="text-muted">No strategies yet — add one below.</p>
+{% endif %}
+
+<hr>
+
+<!-- ===== Add a new strategy ===== -->
+{% if columns %}
+<h5>Add a strategy</h5>
+<form method="post">
+  <div class="row mb-3">
+    <div class="col-md-6">
+      <label class="form-label">Strategy name</label>
+      <input name="name" class="form-control" placeholder="e.g. EmpID + Worker">
+    </div>
+  </div>
+
+  <table class="table table-sm table-striped table-bordered">
+    <thead>
+      <tr><th>Field / data element</th><th style="width:14rem;">Role</th>
+          <th style="width:16rem;">Search mode</th></tr>
+    </thead>
+    <tbody>
+      {% for c in columns %}
+      <tr>
+        <td>{{ c }}<input type="hidden" name="cfg_col" value="{{ c }}"></td>
+        <td>
+          <select name="cfg_role" class="form-select form-select-sm">
+            <option value="off" selected>— not used —</option>
+            <option value="mandatory">Mandatory (AND)</option>
+            <option value="optional">Optional (OR / evidence)</option>
+          </select>
+        </td>
+        <td>
+          <select name="cfg_mode" class="form-select form-select-sm">
+            {% for val, label in mode_labels %}
+              <option value="{{ val }}" {% if val=='exact' %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <button name="action" value="add" class="btn btn-success">Add strategy</button>
+</form>
+{% endif %}
+
+<hr>
+<div class="d-flex align-items-center mb-2">
+  <h5 class="mb-0 me-3">Job log</h5>
+  <button id="stopBtn" class="btn btn-sm btn-warning" style="display:none;"
+          onclick="cancelJob()">Stop job</button>
+</div>
+<div id="log" class="log-box">No job running.</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function cancelJob() {
+  const btn = document.getElementById('stopBtn');
+  btn.disabled = true;
+  btn.textContent = 'Stopping…';
+  try { await fetch('/job/cancel', { method: 'POST' }); } catch (e) {}
+}
+async function poll() {
+  try {
+    const r = await fetch('/job/status');
+    const d = await r.json();
+    const box = document.getElementById('log');
+    box.textContent = d.log.length ? d.log.join('\n') : ('Status: ' + d.status);
+    box.scrollTop = box.scrollHeight;
+    const btn = document.getElementById('stopBtn');
+    if (d.status === 'running') {
+      btn.style.display = 'inline-block';
+    } else {
+      btn.style.display = 'none';
+      btn.disabled = false;
+      btn.textContent = 'Stop job';
+    }
+  } catch (e) {}
+}
+setInterval(poll, 1500); poll();
+</script>
+{% endblock %}

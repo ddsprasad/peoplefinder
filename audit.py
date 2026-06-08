@@ -13,7 +13,8 @@ from typing import Dict, List, Set
 import pandas as pd
 
 from config import Settings
-from search_index import search_md5s
+from search_index import JobCancelled, search_field, search_md5s
+from nicknames import NICKNAMES
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +101,8 @@ def _audit_employee(settings, row, id_col, name_col, anchor_cols, secondary_cols
 
 
 def run_audit(settings, master_path=None, sheet=None, id_col="Employee ID",
-              name_col="Worker", anchor_cols=None, secondary_cols=None) -> List[EmployeeResult]:
+              name_col="Worker", anchor_cols=None, secondary_cols=None,
+              should_cancel=None) -> List[EmployeeResult]:
     anchor_cols = anchor_cols or list(ANCHOR_FIELDS.keys())
     secondary_cols = secondary_cols or list(SECONDARY_FIELDS.keys())
     df = load_master(settings, master_path, sheet)
@@ -117,6 +119,14 @@ def run_audit(settings, master_path=None, sheet=None, id_col="Employee ID",
         }
         done = 0
         for fut in as_completed(futures):
+            # `should_cancel` is an optional zero-arg callable; when it returns
+            # True we drop any not-yet-started work and stop cleanly.
+            if should_cancel is not None and should_cancel():
+                pool.shutdown(wait=False, cancel_futures=True)
+                results.sort(key=lambda r: r.employee_id)
+                log.info("Audit cancelled: %d/%d employees done; "
+                         "returning partial results.", done, len(rows))
+                raise JobCancelled(partial=results)
             results.append(fut.result())
             done += 1
             if done % 50 == 0:
@@ -126,11 +136,8 @@ def run_audit(settings, master_path=None, sheet=None, id_col="Employee ID",
     return results
 
 
-def write_outputs(settings: Settings, results: List[EmployeeResult]) -> None:
-    os.makedirs(settings.output_dir, exist_ok=True)
-    summary_path = os.path.join(settings.output_dir, "employee_md5_summary.csv")
-    matrix_path = os.path.join(settings.output_dir, "employee_md5_matrix.csv")
-
+def _write_result_csvs(results, summary_path, matrix_path):
+    """Write the summary + matrix CSVs for a result set to the given paths."""
     # Summary: one row per employee, count + semicolon-joined md5 list.
     summary_rows = [{
         "Employee ID": r.employee_id,
@@ -138,7 +145,9 @@ def write_outputs(settings: Settings, results: List[EmployeeResult]) -> None:
         "MD5 Hit Count": r.hit_count,
         "MD5 List": ";".join(sorted(r.hits.keys())),
     } for r in results]
-    pd.DataFrame(summary_rows).to_csv(summary_path, index=False, encoding="utf-8-sig")
+    pd.DataFrame(summary_rows,
+                 columns=["Employee ID", "Worker", "MD5 Hit Count", "MD5 List"]) \
+        .to_csv(summary_path, index=False, encoding="utf-8-sig")
 
     # Matrix: one row per (employee, md5) with the fields that matched.
     matrix_rows = []
@@ -158,6 +167,32 @@ def write_outputs(settings: Settings, results: List[EmployeeResult]) -> None:
     log.info("Wrote %s (%d employee/md5 rows)", matrix_path, total_hits)
 
 
+def write_outputs(settings: Settings, results: List[EmployeeResult]) -> None:
+    os.makedirs(settings.output_dir, exist_ok=True)
+    _write_result_csvs(
+        results,
+        os.path.join(settings.output_dir, "employee_md5_summary.csv"),
+        os.path.join(settings.output_dir, "employee_md5_matrix.csv"),
+    )
+
+
+def _slug(name: str) -> str:
+    """Filename-safe slug from a strategy name."""
+    s = "".join(c if c.isalnum() else "_" for c in (name or "").strip()).strip("_")
+    return s or "strategy"
+
+
+def write_strategy_outputs(settings: Settings, strategy_name: str,
+                           results: List[EmployeeResult]):
+    """Write a strategy's own summary + matrix CSVs; return their paths."""
+    os.makedirs(settings.output_dir, exist_ok=True)
+    slug = _slug(strategy_name)
+    summary_path = os.path.join(settings.output_dir, f"{slug}_summary.csv")
+    matrix_path = os.path.join(settings.output_dir, f"{slug}_matrix.csv")
+    _write_result_csvs(results, summary_path, matrix_path)
+    return summary_path, matrix_path
+
+
 def query_employee(settings, employee_id, master_path=None, sheet=None,
                    id_col="Employee ID", name_col="Worker",
                    anchor_cols=None, secondary_cols=None) -> EmployeeResult:
@@ -170,3 +205,76 @@ def query_employee(settings, employee_id, master_path=None, sheet=None,
         raise RuntimeError(f"Employee ID {employee_id} not found in master sheet.")
     return _audit_employee(settings, match.iloc[0], id_col, name_col,
                            anchor_cols, secondary_cols)
+
+
+# ---------------------------------------------------------------------------
+# Strategy engine: a strategy is a named set of fields, each with a search
+# `mode` and a `role` (mandatory = AND, optional = extra evidence).
+#   strategy = {"name": str, "fields": {col: {"mode": str, "role": str}}}
+# ---------------------------------------------------------------------------
+def _audit_employee_strategy(settings, row, id_col, name_col, fields):
+    emp_id = _clean(row.get(id_col))
+    name = _clean(row.get(name_col))
+
+    # Search each populated field with its configured mode.
+    field_md5s: Dict[str, Set[str]] = {}
+    for col, cfg in fields.items():
+        term = _clean(row.get(col))
+        if term:
+            field_md5s[col] = search_field(
+                settings, term, cfg.get("mode", "exact"), nick_lookup=NICKNAMES)
+
+    mandatory = [c for c in field_md5s if fields[c].get("role", "mandatory") == "mandatory"]
+    optional = [c for c in field_md5s if fields[c].get("role") == "optional"]
+
+    if mandatory:
+        # Every populated mandatory field must match the same file (intersection).
+        qualifying: Set[str] = set(field_md5s[mandatory[0]])
+        for c in mandatory[1:]:
+            qualifying &= field_md5s[c]
+    else:
+        # No mandatory fields -> any optional match qualifies (union).
+        qualifying = set()
+        for c in optional:
+            qualifying |= field_md5s[c]
+
+    hits: Dict[str, Set[str]] = {}
+    for md5 in qualifying:
+        hits[md5] = {_col_to_field(c) for c, s in field_md5s.items() if md5 in s}
+    return EmployeeResult(employee_id=emp_id, name=name, hits=hits)
+
+
+def run_strategy(settings, strategy, master_path=None, sheet=None,
+                 id_col="Employee ID", name_col="Worker",
+                 should_cancel=None) -> List[EmployeeResult]:
+    """Run one strategy across every employee in the master sheet."""
+    fields = strategy.get("fields", {})
+    if not fields:
+        return []
+    df = load_master(settings, master_path, sheet)
+    rows = [row for _, row in df.iterrows() if _clean(row.get(id_col))]
+    log.info("Strategy '%s': auditing %d employees over %d field(s) [%d threads]...",
+             strategy.get("name", "?"), len(rows), len(fields), settings.audit_workers)
+
+    results: List[EmployeeResult] = []
+    with ThreadPoolExecutor(max_workers=settings.audit_workers) as pool:
+        futures = {
+            pool.submit(_audit_employee_strategy, settings, r, id_col, name_col, fields): r
+            for r in rows
+        }
+        done = 0
+        for fut in as_completed(futures):
+            if should_cancel is not None and should_cancel():
+                pool.shutdown(wait=False, cancel_futures=True)
+                results.sort(key=lambda r: r.employee_id)
+                log.info("Strategy '%s' cancelled: %d/%d employees done; "
+                         "returning partial results.",
+                         strategy.get("name", "?"), done, len(rows))
+                raise JobCancelled(partial=results)
+            results.append(fut.result())
+            done += 1
+            if done % 50 == 0:
+                log.info("  ...%d/%d employees audited", done, len(rows))
+
+    results.sort(key=lambda r: r.employee_id)
+    return results

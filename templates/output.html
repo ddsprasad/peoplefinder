@@ -65,12 +65,22 @@
 {% endif %}
 
 <hr>
-<h5>Job log</h5>
+<div class="d-flex align-items-center mb-2">
+  <h5 class="mb-0 me-3">Job log</h5>
+  <button id="stopBtn" class="btn btn-sm btn-warning" style="display:none;"
+          onclick="cancelJob()">Stop job</button>
+</div>
 <div id="log" class="log-box">No job running.</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+async function cancelJob() {
+  const btn = document.getElementById('stopBtn');
+  btn.disabled = true;
+  btn.textContent = 'Stopping…';
+  try { await fetch('/job/cancel', { method: 'POST' }); } catch (e) {}
+}
 async function poll() {
   try {
     const r = await fetch('/job/status');
@@ -78,6 +88,14 @@ async function poll() {
     const box = document.getElementById('log');
     box.textContent = d.log.length ? d.log.join('\n') : ('Status: ' + d.status);
     box.scrollTop = box.scrollHeight;
+    const btn = document.getElementById('stopBtn');
+    if (d.status === 'running') {
+      btn.style.display = 'inline-block';
+    } else {
+      btn.style.display = 'none';
+      btn.disabled = false;
+      btn.textContent = 'Stop job';
+    }
   } catch (e) {}
 }
 setInterval(poll, 1500); poll();

@@ -27,13 +27,13 @@ def _setup_logging() -> None:
     )
 
 
-def cmd_index(settings, rebuild: bool = False) -> None:
+def cmd_index(settings, rebuild: bool = False, resume: bool = False) -> None:
     from db import fetch_file_records
     from search_index import ensure_index, index_files
 
     ensure_index(settings, recreate=rebuild)
     records = fetch_file_records(settings)
-    index_files(settings, records)
+    index_files(settings, records, resume=resume)
 
 
 def cmd_audit(settings) -> None:
@@ -64,6 +64,8 @@ def main(argv=None) -> int:
     idx = sub.add_parser("index", help="Load SQL-listed files into Azure AI Search")
     idx.add_argument("--rebuild", action="store_true",
                      help="Drop and recreate the index before loading (full re-wire)")
+    idx.add_argument("--resume", action="store_true",
+                     help="Skip files whose md5 is already indexed (continue a stopped build)")
     sub.add_parser("audit", help="Generate the employee -> md5 CSV matrix")
     q = sub.add_parser("query", help="Look up one employee's md5 hits")
     q.add_argument("--employee", required=True, help="Employee ID to look up")
@@ -73,7 +75,7 @@ def main(argv=None) -> int:
     settings = load_settings()
 
     if args.command == "index":
-        cmd_index(settings, rebuild=args.rebuild)
+        cmd_index(settings, rebuild=args.rebuild, resume=args.resume)
     elif args.command == "audit":
         cmd_audit(settings)
     elif args.command == "query":
