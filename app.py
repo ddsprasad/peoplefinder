@@ -7,6 +7,7 @@ Pages:
 
 Run:  python app.py    then open http://127.0.0.1:5000
 """
+import json
 import logging
 import os
 import threading
@@ -20,8 +21,37 @@ from flask import (
 import audit
 import db
 from config import load_settings
-from search_index import ensure_index, index_files
+from search_index import JobCancelled, SEARCH_MODES, ensure_index, index_files
 from db import fetch_file_records
+
+# Strategies are persisted here so they survive a server restart.
+STRATEGIES_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "strategies.json")
+
+# (mode value, human label) shown in the per-field dropdown.
+MODE_LABELS = [
+    ("exact", "Exact phrase"),
+    ("any_order", "Name — any order"),
+    ("last_first", "Name — Last, First"),
+    ("partial", "Partial (wildcard)"),
+    ("fuzzy", "Fuzzy (typos)"),
+    ("nickname", "Nickname / variants"),
+    ("prefix", "Prefix (IDs)"),
+]
+
+
+def load_strategies():
+    try:
+        with open(STRATEGIES_JSON, encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_strategies(strategies):
+    with open(STRATEGIES_JSON, "w", encoding="utf-8") as fh:
+        json.dump(strategies, fh, indent=2)
 
 app = Flask(__name__)
 # In prod set APP_SECRET_KEY in the environment; falls back to a dev value.
@@ -42,6 +72,7 @@ def _initial_state():
             "anchor_cols": list(audit.ANCHOR_FIELDS.keys()),
             "secondary_cols": list(audit.SECONDARY_FIELDS.keys()),
             "last_results": None,
+            "strategies": load_strategies(),
         }
     except Exception:
         return {
@@ -50,6 +81,7 @@ def _initial_state():
             "anchor_cols": list(audit.ANCHOR_FIELDS.keys()),
             "secondary_cols": list(audit.SECONDARY_FIELDS.keys()),
             "last_results": None,
+            "strategies": load_strategies(),
         }
 
 
@@ -61,13 +93,25 @@ STATE = _initial_state()
 # ---------------------------------------------------------------------------
 class Job:
     def __init__(self):
-        self.status = "idle"      # idle | running | done | error
+        self.status = "idle"      # idle | running | done | error | cancelled
         self.log = []
         self.lock = threading.Lock()
+        self._cancel = threading.Event()
 
     def add(self, line):
         with self.lock:
             self.log.append(line)
+
+    def request_cancel(self):
+        """Ask a running job to stop at its next checkpoint."""
+        self._cancel.set()
+
+    def cancelled(self) -> bool:
+        """Polled by long-running tasks for cooperative cancellation."""
+        return self._cancel.is_set()
+
+    def reset_cancel(self):
+        self._cancel.clear()
 
     def snapshot(self):
         with self.lock:
@@ -85,6 +129,7 @@ class _JobLogHandler(logging.Handler):
 def _run_job(target):
     if JOB.status == "running":
         return False
+    JOB.reset_cancel()
     JOB.status = "running"
     JOB.log = []
     handler = _JobLogHandler()
@@ -99,6 +144,9 @@ def _run_job(target):
             target()
             JOB.status = "done"
             JOB.add("=== FINISHED ===")
+        except JobCancelled:
+            JOB.status = "cancelled"
+            JOB.add("=== CANCELLED ===")
         except Exception as exc:  # noqa: BLE001
             JOB.status = "error"
             JOB.add(f"!!! ERROR: {exc}")
@@ -114,6 +162,16 @@ def job_status():
     return jsonify(JOB.snapshot())
 
 
+@app.route("/job/cancel", methods=["POST"])
+def job_cancel():
+    """Request a clean stop of the running job (index build or audit)."""
+    if JOB.status == "running":
+        JOB.request_cancel()
+        JOB.add(">>> Stop requested; finishing the current batch, then halting...")
+        return jsonify({"ok": True, "status": "cancelling"})
+    return jsonify({"ok": False, "status": JOB.status})
+
+
 # ---------------------------------------------------------------------------
 # Page 1: Index builder
 # ---------------------------------------------------------------------------
@@ -121,13 +179,16 @@ def job_status():
 def index_page():
     if request.method == "POST":
         STATE["sql"] = request.form.get("sql", "").strip()
-        rebuild = request.form.get("action") == "rebuild"
+        action = request.form.get("action")
+        rebuild = action == "rebuild"
+        resume = action == "resume"
 
         def task():
             settings = load_settings()
             ensure_index(settings, recreate=rebuild)
             records = fetch_file_records(settings, STATE["sql"])
-            index_files(settings, records)
+            index_files(settings, records, should_cancel=JOB.cancelled,
+                        resume=resume)
 
         if not _run_job(task):
             flash("A job is already running. Wait for it to finish.", "warning")
@@ -174,6 +235,16 @@ def master_page():
 # ---------------------------------------------------------------------------
 # Page 3: Output / audit
 # ---------------------------------------------------------------------------
+def _save_audit_results(settings, results):
+    """Write the audit CSVs and cache a summary for the Output page table."""
+    audit.write_outputs(settings, results)
+    STATE["last_results"] = [
+        {"employee_id": r.employee_id, "name": r.name,
+         "hit_count": r.hit_count, "md5s": sorted(r.hits.keys())}
+        for r in results
+    ]
+
+
 @app.route("/output", methods=["GET", "POST"])
 def output_page():
     single = None
@@ -182,17 +253,23 @@ def output_page():
         if action == "audit":
             def task():
                 settings = load_settings()
-                results = audit.run_audit(
-                    settings, STATE["master_path"], STATE["sheet"],
-                    STATE["id_col"], STATE["name_col"],
-                    STATE["anchor_cols"], STATE["secondary_cols"])
-                audit.write_outputs(settings, results)
-                STATE["last_results"] = [
-                    {"employee_id": r.employee_id, "name": r.name,
-                     "hit_count": r.hit_count,
-                     "md5s": sorted(r.hits.keys())}
-                    for r in results
-                ]
+                try:
+                    results = audit.run_audit(
+                        settings, STATE["master_path"], STATE["sheet"],
+                        STATE["id_col"], STATE["name_col"],
+                        STATE["anchor_cols"], STATE["secondary_cols"],
+                        should_cancel=JOB.cancelled)
+                except JobCancelled as cancelled:
+                    # Persist whatever completed before the stop, then re-raise
+                    # so the job is marked 'cancelled'. Skip writing if nothing
+                    # was done, to avoid clobbering a prior good CSV with empties.
+                    partial = cancelled.partial or []
+                    if partial:
+                        _save_audit_results(settings, partial)
+                        JOB.add(f">>> Saved partial results for {len(partial)} "
+                                f"employees before stopping.")
+                    raise
+                _save_audit_results(settings, results)
             if not _run_job(task):
                 flash("A job is already running. Wait for it to finish.", "warning")
             return redirect(url_for("output_page"))
@@ -223,6 +300,119 @@ def download(filename):
     settings = load_settings()
     return send_from_directory(os.path.abspath(settings.output_dir),
                                filename, as_attachment=True)
+
+
+# ---------------------------------------------------------------------------
+# Page 4: Strategies — named field+mode+role combinations, each writes its CSV
+# ---------------------------------------------------------------------------
+def _master_columns():
+    """Columns of the configured master sheet (empty list if not loadable)."""
+    path = STATE.get("master_path")
+    if path and os.path.isfile(path):
+        try:
+            df = audit.load_master(load_settings(), path, STATE.get("sheet"))
+            return list(df.columns)
+        except Exception:  # noqa: BLE001
+            return []
+    return []
+
+
+def _start_strategy_job(indices):
+    """Run the chosen strategies sequentially as one background job; each
+    strategy writes its own pair of CSVs. Cancelling saves the in-flight
+    strategy's partial CSV, then stops."""
+    strategies = STATE["strategies"]
+    chosen = [strategies[i] for i in indices if 0 <= i < len(strategies)]
+    if not chosen:
+        flash("No valid strategies selected.", "warning")
+        return
+
+    def task():
+        settings = load_settings()
+        for strat in chosen:
+            name = strat.get("name", "strategy")
+            JOB.add(f"=== Running strategy: {name} ===")
+            try:
+                results = audit.run_strategy(
+                    settings, strat, STATE["master_path"], STATE["sheet"],
+                    STATE["id_col"], STATE["name_col"],
+                    should_cancel=JOB.cancelled)
+            except JobCancelled as cancelled:
+                partial = cancelled.partial or []
+                if partial:
+                    sp, mp = audit.write_strategy_outputs(settings, name, partial)
+                    JOB.add(f">>> Saved partial CSV for '{name}' "
+                            f"({len(partial)} employees): {os.path.basename(sp)}")
+                raise
+            sp, mp = audit.write_strategy_outputs(settings, name, results)
+            total = sum(r.hit_count for r in results)
+            JOB.add(f"Strategy '{name}': {total} file hits -> "
+                    f"{os.path.basename(sp)}, {os.path.basename(mp)}")
+        JOB.add(f"Generated CSVs for {len(chosen)} strateg(ies).")
+
+    if not _run_job(task):
+        flash("A job is already running. Wait for it to finish.", "warning")
+
+
+@app.route("/strategies", methods=["GET", "POST"])
+def strategies_page():
+    columns = _master_columns()
+
+    if request.method == "POST":
+        action = request.form.get("action", "")
+
+        if action == "add":
+            name = (request.form.get("name", "").strip()
+                    or f"Strategy {len(STATE['strategies']) + 1}")
+            cols = request.form.getlist("cfg_col")
+            roles = request.form.getlist("cfg_role")
+            modes = request.form.getlist("cfg_mode")
+            fields = {}
+            for col, role, mode in zip(cols, roles, modes):
+                if role in ("mandatory", "optional"):
+                    mode = mode if mode in SEARCH_MODES else "exact"
+                    fields[col] = {"role": role, "mode": mode}
+            if fields:
+                STATE["strategies"].append({"name": name, "fields": fields})
+                save_strategies(STATE["strategies"])
+                flash(f"Added strategy '{name}' ({len(fields)} field(s)).", "success")
+            else:
+                flash("Pick at least one field (mandatory or optional) for the strategy.",
+                      "warning")
+            return redirect(url_for("strategies_page"))
+
+        # Per-row buttons encode the index in the action value: "delete:N" / "run_one:N".
+        if action.startswith("delete:"):
+            i = int(action.split(":", 1)[1]) if action.split(":", 1)[1].isdigit() else -1
+            if 0 <= i < len(STATE["strategies"]):
+                removed = STATE["strategies"].pop(i)
+                save_strategies(STATE["strategies"])
+                flash(f"Deleted strategy '{removed.get('name')}'.", "info")
+            return redirect(url_for("strategies_page"))
+
+        if action.startswith("run_one:"):
+            i = int(action.split(":", 1)[1]) if action.split(":", 1)[1].isdigit() else -1
+            if 0 <= i < len(STATE["strategies"]):
+                _start_strategy_job([i])
+            else:
+                flash("Strategy not found.", "danger")
+            return redirect(url_for("strategies_page"))
+
+        if action in ("run_selected", "run_all"):
+            if action == "run_all":
+                indices = list(range(len(STATE["strategies"])))
+            else:
+                indices = [int(i) for i in request.form.getlist("run_idx")
+                           if i.isdigit()]
+            if not indices:
+                flash("Select at least one strategy to run (or use Run all).",
+                      "warning")
+            else:
+                _start_strategy_job(indices)
+            return redirect(url_for("strategies_page"))
+
+    return render_template("strategies.html", state=STATE, columns=columns,
+                           mode_labels=MODE_LABELS)
 
 
 if __name__ == "__main__":
