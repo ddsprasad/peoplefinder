@@ -238,16 +238,31 @@ def write_strategy_outputs(settings: Settings, strategy_name: str,
     return summary_path, matrix_path
 
 
-def query_employee(settings, employee_id, master_path=None, sheet=None,
+def query_employee(settings, term, master_path=None, sheet=None,
                    id_col="Employee ID", name_col="Worker",
                    anchor_cols=None, secondary_cols=None) -> EmployeeResult:
-    """Live single-employee lookup against the index."""
+    """Live single-employee lookup by Employee ID *or* name (Worker).
+
+    Resolution order: exact Employee ID, then exact name (case-insensitive),
+    then a name 'contains' match. Uses the first matching row.
+    """
     anchor_cols = anchor_cols or list(ANCHOR_FIELDS.keys())
     secondary_cols = secondary_cols or list(SECONDARY_FIELDS.keys())
     df = load_master(settings, master_path, sheet)
-    match = df[df[id_col].astype(str).str.strip() == str(employee_id).strip()]
+    t = str(term).strip()
+
+    ids = df[id_col].astype(str).str.strip()
+    names = df[name_col].astype(str).str.strip()
+
+    match = df[ids == t]                                   # exact Employee ID
     if match.empty:
-        raise RuntimeError(f"Employee ID {employee_id} not found in master sheet.")
+        match = df[names.str.lower() == t.lower()]         # exact name
+    if match.empty:                                        # partial name
+        match = df[names.str.lower().str.contains(t.lower(), na=False, regex=False)]
+    if match.empty:
+        raise RuntimeError(
+            f"No employee found matching '{term}' "
+            f"(tried Employee ID and {name_col}).")
     return _audit_employee(settings, match.iloc[0], id_col, name_col,
                            anchor_cols, secondary_cols)
 
