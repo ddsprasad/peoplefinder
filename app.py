@@ -366,12 +366,15 @@ def strategies_page():
                     or f"Strategy {len(STATE['strategies']) + 1}")
             cols = request.form.getlist("cfg_col")
             roles = request.form.getlist("cfg_role")
-            modes = request.form.getlist("cfg_mode")
             fields = {}
-            for col, role, mode in zip(cols, roles, modes):
+            for i, (col, role) in enumerate(zip(cols, roles)):
                 if role in ("mandatory", "optional"):
-                    mode = mode if mode in SEARCH_MODES else "exact"
-                    fields[col] = {"role": role, "mode": mode}
+                    # Each row's modes are checkboxes named mode_<rowindex>.
+                    modes = [m for m in request.form.getlist(f"mode_{i}")
+                             if m in SEARCH_MODES]
+                    if not modes:
+                        modes = ["exact"]
+                    fields[col] = {"role": role, "modes": modes}
             if fields:
                 STATE["strategies"].append({"name": name, "fields": fields})
                 save_strategies(STATE["strategies"])

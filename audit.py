@@ -221,8 +221,10 @@ def _audit_employee_strategy(settings, row, id_col, name_col, fields):
     for col, cfg in fields.items():
         term = _clean(row.get(col))
         if term:
+            # `modes` is the new (list) form; fall back to legacy single `mode`.
+            modes = cfg.get("modes") or [cfg.get("mode", "exact")]
             field_md5s[col] = search_field(
-                settings, term, cfg.get("mode", "exact"), nick_lookup=NICKNAMES)
+                settings, term, modes, nick_lookup=NICKNAMES)
 
     mandatory = [c for c in field_md5s if fields[c].get("role", "mandatory") == "mandatory"]
     optional = [c for c in field_md5s if fields[c].get("role") == "optional"]
