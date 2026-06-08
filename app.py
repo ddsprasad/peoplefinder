@@ -331,6 +331,7 @@ def _start_strategy_job(indices):
         settings = load_settings()
         for strat in chosen:
             name = strat.get("name", "strategy")
+            field_cols = list(strat.get("fields", {}).keys())
             JOB.add(f"=== Running strategy: {name} ===")
             try:
                 results = audit.run_strategy(
@@ -340,11 +341,12 @@ def _start_strategy_job(indices):
             except JobCancelled as cancelled:
                 partial = cancelled.partial or []
                 if partial:
-                    sp, mp = audit.write_strategy_outputs(settings, name, partial)
+                    sp, mp = audit.write_strategy_outputs(
+                        settings, name, partial, field_cols)
                     JOB.add(f">>> Saved partial CSV for '{name}' "
                             f"({len(partial)} employees): {os.path.basename(sp)}")
                 raise
-            sp, mp = audit.write_strategy_outputs(settings, name, results)
+            sp, mp = audit.write_strategy_outputs(settings, name, results, field_cols)
             total = sum(r.hit_count for r in results)
             JOB.add(f"Strategy '{name}': {total} file hits -> "
                     f"{os.path.basename(sp)}, {os.path.basename(mp)}")
