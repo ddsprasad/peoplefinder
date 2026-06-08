@@ -1,0 +1,4 @@
+[azure] Azure AI Search connection
+  -> FAIL: () Request is denied as the source is not allowed by applicable rules. The service is set 'publicNetworkAccess: Enabled'. Please review all service's network security settings to ensure the client is allowed.
+Code: 
+Message: Request is denied as the source is not allowed by applicable rules. The service is set 'publicNetworkAccess: Enabled'. Please review all service's network security settings to ensure the client is allowed.
