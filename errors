@@ -1,2 +1,8 @@
-$p = (Get-NetTCPConnection -LocalPort 8080 -State Listen).OwningProcess
-  Stop-Process -Id $p -Force
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Select-Object ProcessId, CommandLine | Format-List
+
+  This lists every python.exe with its full command line. Find the one whose command line contains serve.py (or app.py) and note its ProcessId.
+
+  2. Kill it by that PID
+
+  Stop-Process -Id <ProcessId> -Force
