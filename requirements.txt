@@ -9,3 +9,7 @@ beautifulsoup4>=4.12
 lxml>=5.2
 flask>=3.0
 waitress>=3.0
+pypdf>=4.0
+python-docx>=0.8.11
+docx2txt>=0.8
+python-pptx>=0.6.21

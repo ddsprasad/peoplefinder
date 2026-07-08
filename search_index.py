@@ -132,10 +132,23 @@ def index_files(settings: Settings, records: Iterable[FileRecord],
     skipped_existing = 0
 
     def flush() -> None:
-        nonlocal batch
+        nonlocal batch, total_docs
         if not batch:
             return
-        client.upload_documents(documents=batch)
+        try:
+            result = client.upload_documents(documents=batch)
+            uploaded = len([r for r in result if r.succeeded])
+            failed = len([r for r in result if not r.succeeded])
+            if failed > 0:
+                log.warning("Batch upload: %d succeeded, %d FAILED", uploaded, failed)
+                for r in result:
+                    if not r.succeeded:
+                        log.warning("  Failed doc: %s — %s", r.key, r.error_message)
+            else:
+                log.debug("Batch upload: %d documents succeeded", uploaded)
+        except Exception as e:
+            log.error("UPLOAD FAILED: %s", e, exc_info=True)
+            raise
         batch = []
 
     for rec in records:
@@ -171,7 +184,9 @@ def index_files(settings: Settings, records: Iterable[FileRecord],
             })
             total_docs += 1
             if len(batch) >= UPLOAD_BATCH:
+                log.info(">>> Uploading batch (%d docs)...", len(batch))
                 flush()
+                log.info(">>> Batch uploaded. Total so far: %d files, %d documents", total_files, total_docs)
         if total_files % 200 == 0:
             log.info("Processed %d files (%d docs uploaded)...", total_files, total_docs)
 
@@ -181,6 +196,18 @@ def index_files(settings: Settings, records: Iterable[FileRecord],
         "%d already-indexed skipped (resume), %d documents uploaded.",
         total_files, skipped, skipped_existing, total_docs,
     )
+
+    # Verify documents are actually in the index
+    if total_docs > 0:
+        try:
+            verify_result = client.search(search_text="*", select=["md5"], top=1)
+            verify_count = sum(1 for _ in verify_result)
+            if verify_count > 0:
+                log.info("✓ VERIFIED: Index contains searchable documents")
+            else:
+                log.warning("⚠ WARNING: No documents found in index after upload")
+        except Exception as e:
+            log.error("✗ Could not verify index contents: %s", e)
 
 
 # --- Per-field query building (queryType=full / Lucene) ---------------------

@@ -32,14 +32,23 @@ def fetch_file_records(settings: Settings, query: str = None) -> List[FileRecord
     sql = (query or "").strip() or QUERY
     log.info("Connecting to SQL Server %s/%s", settings.db_server, settings.db_database)
     records: List[FileRecord] = []
-    with pyodbc.connect(settings.odbc_connection_string) as conn:
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        for row in cursor.fetchall():
-            # Use positional columns so custom queries with aliases still work.
-            md5 = (str(row[0]).strip() if row[0] is not None else "")
-            path = (str(row[1]).strip() if len(row) > 1 and row[1] is not None else "")
-            if md5 and path:
-                records.append(FileRecord(md5=md5, file_path=path))
-    log.info("Fetched %d file records from SQL Server", len(records))
+    try:
+        with pyodbc.connect(settings.odbc_connection_string) as conn:
+            cursor = conn.cursor()
+            log.info(">>> Executing query...")
+            cursor.execute(sql)
+            all_rows = cursor.fetchall()
+            log.info(">>> Query returned %d rows", len(all_rows))
+            for i, row in enumerate(all_rows):
+                # Use positional columns so custom queries with aliases still work.
+                md5 = (str(row[0]).strip() if row[0] is not None else "")
+                path = (str(row[1]).strip() if len(row) > 1 and row[1] is not None else "")
+                if md5 and path:
+                    records.append(FileRecord(md5=md5, file_path=path))
+                if i > 0 and (i + 1) % 100 == 0:
+                    log.debug("  Processed %d rows...", i + 1)
+        log.info("✓ Fetched %d file records from SQL Server", len(records))
+    except Exception as e:
+        log.error("✗ SQL Server query failed: %s", e, exc_info=True)
+        raise
     return records
